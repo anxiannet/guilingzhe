@@ -9,7 +9,7 @@
 插图阶段不包含卡名、技能、编号、区域信息和 Logo。
 ```
 
-当前待上传文件：
+当前已入库文件：
 
 ```text
 hummingbird-hive-illustration-01.png
@@ -19,5 +19,6 @@ hummingbird-hive-illustration-01.png
 
 ```text
 该文件为蜂鸟巢无文字插图候选 01。
-上传后再进入中文版样卡 v1 合成。
+已完成标准命名。
+下一步进入中文版样卡 v1 合成准备。
 ```
