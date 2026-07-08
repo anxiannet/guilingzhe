@@ -18,8 +18,16 @@
 ## 当前编号范围
 
 ```text
-G-001 至 G-004：标准版唯一越权模块。
-G-005：扩展包新增唯一越权模块。
+G-001 至 G-007：标准版唯一越权模块。
+```
+
+---
+
+## 当前新增记录
+
+```text
+G-006：蜂鸟无人机 / Hummingbird Drone。
+G-007：防御地堡 / Defense Bunker。
 ```
 
 ---
@@ -28,6 +36,8 @@ G-005：扩展包新增唯一越权模块。
 
 ```text
 G-004：离线地堡 / Offline Bunker。
+G-006：蜂鸟无人机 / Hummingbird Drone。
+G-007：防御地堡 / Defense Bunker。
 ```
 
 说明：
