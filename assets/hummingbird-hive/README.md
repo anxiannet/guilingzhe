@@ -9,6 +9,7 @@
 已完成第一轮文件名整理：UUID 文件已改为连续编号，语义参考图已移入 reference/。
 蜂鸟巢无文字插图候选 01 已入库。
 蜂鸟巢唯一卡号为 N-007 / DN-D1。
+已建立 N-007 / DN-D1 的版本记录文件。
 下一步进入中文版样卡 v1 合成准备。
 ```
 
@@ -52,6 +53,8 @@ assets/hummingbird-hive/
     hummingbird-hive-illustration-01.png
   composite/
     README.md
+  version-records/
+    N-007_DN-D1.md
 ```
 
 ---
@@ -100,7 +103,15 @@ N-007 / DN-D1
 语言版本：中文版
 样卡版本：CN-v1.0
 插图版本：ILLUS-01
+卡框版本：FRAME-v1.0
+导出版本：EXPORT-v1.0
 计划导出：N-007_DN-D1_hummingbird-hive_cn-card-v1.png
+```
+
+版本记录文件：
+
+```text
+assets/hummingbird-hive/version-records/N-007_DN-D1.md
 ```
 
 说明：
@@ -111,6 +122,7 @@ N-007 / DN-D1 是世界观内真实封存卡号与节点位址，不是后台制
 无人机域是该封存卡的正式系统域标签，不是辅助说明。
 文件名可以包含卡号信息，方便排序和查找；文件名不是第二套卡号。
 版本记录归属到 N-007 / DN-D1 下面，但不拼进卡号。
+使用该版本记录文件，可以复现同一张完整卡。
 ```
 
 计划输出：
@@ -130,4 +142,5 @@ assets/hummingbird-hive/composite/N-007_DN-D1_hummingbird-hive_cn-card-v1.png
 4. 后续先合成中文版样卡 v1，再根据审核结果决定是否制作英文版。
 5. 每次导出样卡都必须记录卡号、系统域标签、语言版本、样卡版本、插图版本和卡框版本。
 6. 不制造第二套版本管理卡号。
+7. 通过卡号 N-007 / DN-D1 必须能定位到可复现完整卡的版本记录。
 ```
