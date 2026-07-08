@@ -30,7 +30,7 @@ G-006
 ```text
 蜂鸟无人机
 
-选择1个可查看牌库，查看其顶1张。
+查看任意牌库顶1张。
 
 费用：1电荷
 ATK 0 / HP 1
@@ -46,37 +46,29 @@ G-006
 无攻击能力，生命值很低。
 ```
 
-## 可查看牌库定义
-
-4人共用牌库模式：
+## 规则说明
 
 ```text
-手牌牌库。
-节点牌库。
-```
-
-双人对战模式：
-
-```text
-自己的手牌牌库。
-对手的手牌牌库。
+蜂鸟无人机不在卡面直接写具体牌库名称。
+“任意牌库”由当前游戏模式提供可选目标集合。
+只有节点卡可以在卡面和卡牌记录中直接提及节点牌库。
 ```
 
 ## 世界观解释
 
 ```text
 蜂鸟无人机是微型侦察设备。
-在多人共用牌库模式中，它可以扫描公共资源流或节点资源流。
-在双人对战模式中，它可以侦察己方牌库或对手牌库顶端信息。
+它扫描当前模式中允许访问的牌库顶端信号。
+它不绑定某一种固定牌库，因此适配多人共用牌库模式和双人对战模式。
 ```
 
 ## 自动测试说明
 
 ```text
 输入：game_mode、actor_player_id、target_deck_id。
-目标限制：target_deck_id 必须属于当前模式允许的可查看牌库。
-4人共用牌库模式：target_deck_id 可以是 hand_deck 或 node_deck。
-双人对战模式：target_deck_id 可以是 actor_hand_deck 或 opponent_hand_deck。
+规则引擎根据 game_mode 生成 available_deck_ids。
+target_deck_id 必须属于 available_deck_ids。
 效果：查看 target_deck_id 顶1张牌。
+双人对战模式中，available_deck_ids 通常为 actor_hand_deck 与 opponent_hand_deck。
 禁止：任意口头声明、喊名、答应、真人反应触发。
 ```
