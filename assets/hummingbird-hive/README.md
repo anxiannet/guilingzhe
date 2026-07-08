@@ -79,10 +79,16 @@ assets/hummingbird-hive/illustration/hummingbird-hive-illustration-01.png
 蜂鸟巢
 无人机域
 
-控制此节点：查看节点牌库顶1张，可置顶或置底。
+查看节点牌库顶1张，可置顶或置底。
 
 D1 / DN-D1
 归零者 / ZERO ACCESS
+```
+
+说明：
+
+```text
+“控制此节点”作为权限节点技能规则写入规则说明，不再作为每张权限节点卡的固定前缀。
 ```
 
 计划输出：
