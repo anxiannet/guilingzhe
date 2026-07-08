@@ -41,45 +41,66 @@
 
 ---
 
-## 三、当前优先执行范围
-
-当前先建立以下版本记录体系：
+## 三、当前完成状态
 
 ```text
-1. 12 张权限节点：必须全部建立版本记录。
-2. 当前重点样卡蜂鸟巢：已建立详细复现记录。
-3. 公共牌库执行者与越权模块：先建立全卡索引，再随样卡推进建立详细记录。
-```
-
----
-
-## 四、当前目录建议
-
-```text
-assets/version-records/
-  README.md
-  nodes/
-    N-001_AD-A1.md
-    N-002_AD-A2.md
-    ...
-    N-012_CD-C3.md
-  operators/
-    待建立
-  override-gear/
-    待建立
+12 张权限节点：版本记录已全部建立。
+23 张唯一执行者：版本记录已全部建立。
+5 张唯一越权模块：版本记录已全部建立。
+蜂鸟巢：已建立详细复现记录。
 ```
 
 说明：
 
 ```text
-节点卡号使用 N-001 / AD-A1 这类世界观内正式卡号。
-文件名将斜杠替换为下划线，便于文件系统保存。
-文件名不是第二套卡号。
+当前版本记录多为“记录入口 + 卡面草案 + 待补资产路径”。
+当插图、卡框和导出图确认后，应回填具体资产路径和审核结论。
 ```
 
 ---
 
-## 五、蜂鸟巢当前记录
+## 四、当前目录结构
+
+```text
+assets/version-records/
+  README.md
+  nodes/
+    README.md
+    N-001_AD-A1.md
+    N-002_AD-A2.md
+    N-003_AD-A3.md
+    N-004_MD-M1.md
+    N-005_MD-M2.md
+    N-006_MD-M3.md
+    N-007_DN-D1.md
+    N-008_DN-D2.md
+    N-009_DN-D3.md
+    N-010_CD-C1.md
+    N-011_CD-C2.md
+    N-012_CD-C3.md
+  operators/
+    README.md
+    R-001_trace-runner.md
+    ...
+    R-023_red-alert-root.md
+  override-gear/
+    README.md
+    G-001_containment-sandbox.md
+    ...
+    G-005_forced-rollback.md
+```
+
+说明：
+
+```text
+文件名将斜杠替换为下划线，便于文件系统保存。
+文件名不是第二套卡号。
+真实卡号以记录文件内的“唯一卡号”为准。
+```
+
+---
+
+## 五、蜂鸟巢当前详细记录
 
 蜂鸟巢当前详细记录位置：
 
@@ -87,10 +108,8 @@ assets/version-records/
 assets/hummingbird-hive/version-records/N-007_DN-D1.md
 ```
 
-后续也可以在全卡目录中建立索引或镜像记录：
+全卡目录入口：
 
 ```text
 assets/version-records/nodes/N-007_DN-D1.md
 ```
-
-当前以蜂鸟巢资产目录内记录为准。
