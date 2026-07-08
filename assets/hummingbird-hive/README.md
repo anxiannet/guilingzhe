@@ -8,7 +8,8 @@
 资产目录不按版本号命名。
 已完成第一轮文件名整理：UUID 文件已改为连续编号，语义参考图已移入 reference/。
 蜂鸟巢无文字插图候选 01 已入库。
-下一步进入中文版样卡 v1 合成准备。
+蜂鸟巢卡面编号调整为 N-007 / DN-D1。
+下一步进入中文版样卡 v1 合成准备，样卡版本记录为 CN-v1.0。
 ```
 
 ---
@@ -81,14 +82,25 @@ assets/hummingbird-hive/illustration/hummingbird-hive-illustration-01.png
 
 查看节点牌库顶1张，可置顶或置底。
 
-D1 / DN-D1
+N-007 / DN-D1
 归零者 / ZERO ACCESS
+```
+
+版本记录：
+
+```text
+卡面编号：N-007 / DN-D1
+语言版本：中文版
+样卡版本：CN-v1.0
+插图版本：hummingbird-hive-illustration-01.png
+计划导出：hummingbird-hive-cn-card-v1.png
 ```
 
 说明：
 
 ```text
 “控制此节点”作为权限节点技能规则写入规则说明，不再作为每张权限节点卡的固定前缀。
+版本号进入资产文件名和审核记录，不作为正式规则文本。
 ```
 
 计划输出：
@@ -106,4 +118,5 @@ assets/hummingbird-hive/composite/hummingbird-hive-cn-card-v1.png
 2. 卡框、插图、文字排版必须分层处理。
 3. 技能文案、编号、区域信息与 Logo 必须人工排版。
 4. 后续先合成中文版样卡 v1，再根据审核结果决定是否制作英文版。
+5. 每次导出样卡都必须记录卡面编号、语言版本、样卡版本、插图版本和卡框版本。
 ```
