@@ -11,6 +11,7 @@
 - 开局翻开 3 张节点进入中央节点区。
 - 部署到中央节点区无主节点后，获得节点控制权，并补充中央节点区至 3 张。
 - 已控制节点没有己方实体时，节点变为无主，回流节点牌库并重洗。
+- 可部署实体入场技能不得回手己方场上实体。
 - 这是平衡压力测试器，不是最终规则引擎。
 """
 
@@ -108,13 +109,13 @@ CARDS: list[CardDef] = [
     CardDef("R-003", "预读者", "runner", 2, 1, 2, "look_and_reorder"),
     CardDef("R-004", "扒手", "runner", 1, 1, 1, "look_hand"),
     CardDef("R-005", "广播员", "runner", 2, 1, 2, "draw"),
-    CardDef("R-007", "烟幕手", "runner", 2, 1, 2, "return_own_runner_hand"),
+    CardDef("R-007", "烟幕手", "runner", 2, 1, 2, "return_enemy_runner_hand"),
     CardDef("R-008", "洗牌客", "runner", 1, 1, 1, "shuffle_deck"),
     CardDef("R-009", "清除者", "runner", 4, 3, 2, "destroy_enemy_runner"),
     CardDef("R-010", "甩棍", "runner", 2, 2, 1, "return_enemy_runner_hand"),
     CardDef("R-013", "不倒翁", "runner", 3, 1, 3, "passive_return_when_destroyed"),
     CardDef("R-014", "筛选员", "runner", 3, 1, 2, "look_and_reorder"),
-    CardDef("R-015", "扳手", "runner", 2, 1, 2, "return_own_equipment_hand"),
+    CardDef("R-015", "扳手", "runner", 2, 1, 2, "return_enemy_equipment_hand"),
     CardDef("R-016", "推土机", "runner", 4, 3, 3, "multi_return_enemy_runners_hand"),
     CardDef("R-017", "爆破兵", "runner", 4, 3, 2, "destroy_enemy_equipment"),
     CardDef("R-018", "门神", "runner", 3, 1, 4, "return_enemy_runner_hand"),
@@ -127,7 +128,7 @@ CARDS: list[CardDef] = [
     CardDef("G-004", "撤离信标", "one_shot", 2, None, None, "return_own_runner_hand"),
     CardDef("G-005", "强制回滚扇区", "one_shot", 5, None, None, "multi_return_enemy_runners_hand"),
     CardDef("G-006", "蜂鸟无人机", "equipment", 1, 0, 1, "look_deck_top"),
-    CardDef("G-007", "回收地堡", "equipment", 4, 1, 5, "return_own_equipment_hand"),
+    CardDef("G-007", "回收地堡", "equipment", 4, 1, 5, "look_and_reorder"),
     CardDef("G-008", "牵引锚", "one_shot", 2, None, None, "return_enemy_equipment_hand"),
     CardDef("G-009", "探针", "one_shot", 1, None, None, "look_deck_top"),
     CardDef("G-010", "算盘", "one_shot", 2, None, None, "look_and_reorder"),
@@ -158,7 +159,6 @@ DEFAULT_COPIES["G-011"] += 1
 class Game:
     def __init__(self, rng: random.Random, player_count: int, deck_mode: DeckMode = "shared", max_turns: int = 30, opening_hand: int = 5):
         if deck_mode == "separate":
-            # 兼容旧命令行参数；当前正式测试仍强制按 shared 执行。
             deck_mode = "shared"
         self.rng = rng
         self.player_count = player_count
@@ -409,12 +409,7 @@ class Game:
         return [n for n in self.controlled_nodes() if n.controller != pid and n.protected_by is None and n.entities]
 
     def available_attackers(self, pid: int) -> list[tuple[NodeState, Entity]]:
-        return [
-            (node, e)
-            for node in self.controlled_nodes(pid)
-            for e in node.entities
-            if e.owner == pid and not e.attacked_this_turn and e.entered_turn < self.current_turn and e.atk > 0
-        ]
+        return [(node, e) for node in self.controlled_nodes(pid) for e in node.entities if e.owner == pid and not e.attacked_this_turn and e.entered_turn < self.current_turn and e.atk > 0]
 
     def choose_attack(self, pid: int) -> Optional[tuple[NodeState, list[tuple[NodeState, Entity]]]]:
         targets = self.legal_attack_targets(pid)
@@ -432,8 +427,7 @@ class Game:
         if not choice:
             return False
         target, attackers_with_sources = choice
-        cost = len(attackers_with_sources) * ATTACK_COST_PER_ENTITY
-        player.charge -= cost
+        player.charge -= len(attackers_with_sources) * ATTACK_COST_PER_ENTITY
         self.stats.attacks += 1
         source_by_uid = {entity.uid: source for source, entity in attackers_with_sources}
         attackers = [entity for _, entity in attackers_with_sources]
