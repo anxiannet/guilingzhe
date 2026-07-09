@@ -2,68 +2,56 @@
 # -*- coding: utf-8 -*-
 """
 归零者 / ZERO ACCESS
-2–4 人整套卡牌平衡模拟器 v0.2
+2–4 人整套卡牌平衡模拟器 v0.3
 
 用途：
-1. 模拟 2 到 4 人对战流程。
-2. 粗测整套游侠、物品卡、节点技能费用的平衡性。
+1. 模拟 2 到 4 人测试流程。
+2. 按《03-规则变体.md》的当前测试规则粗测卡牌平衡。
 3. 输出各座位胜率、平均结束回合、卡牌使用率、节点技能使用率、疑似强卡 / 弱卡。
 
 运行：
     python scripts/balance_simulator.py --players 2 --games 1000 --seed 7
     python scripts/balance_simulator.py --players 3 --games 1000 --seed 7
     python scripts/balance_simulator.py --players 4 --games 1000 --seed 7
+    python scripts/balance_simulator.py --players 4 --deck-mode shared --games 1000 --seed 7
+
+当前规则假设：
+- 2 人默认 separate：双方各自使用 62 张临时测试牌库。
+- 3 / 4 人默认 shared：所有玩家共用 1 个 62 张临时测试手牌牌库和公共弃牌区。
+- 每名玩家每回合最多使用 1 次节点技能。
+- 每名玩家每回合最多执行 1 个主要行动：打出 1 张游侠或物品卡，或放弃。
+- 打出可部署实体时，先部署到节点，再结算入场技能。
+- 一次性物品不部署，直接结算技能。
+- 节点控制采用当前测试接管算法：节点上 ATK 总和最高且大于 0 的玩家控制；并列时控制权不变。
+- 保护持续到保护者下个回合开始。
+- 牌库耗尽后不自动重洗弃牌区。
 
 重要说明：
 - 这是平衡压力测试器，不是最终规则引擎。
 - 当前用启发式 AI 模拟玩家行为，不代表真人最优解。
-- 当前复制数是临时测试复制数：30 张不同手牌卡默认各 2 张，侦察员和数据抽取器额外各 1 张，总计 62 张。
-- 每名玩家使用一副相同的 62 张临时测试牌库。
-- 当前节点控制模型采用“节点上某玩家 ATK 总和最高且大于 0，即控制该节点”。并列时控制权不变。
-- 当前不模拟完整战斗伤害，因为标准版手牌技能已移除伤害 / 治疗类动作。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Literal, Optional
-from collections import Counter, defaultdict
+from collections import Counter
 import argparse
 import random
 import statistics
 
 CardType = Literal["runner", "one_shot", "equipment"]
+DeckMode = Literal["shared", "separate"]
 SkillKind = Literal[
-    "draw",
-    "look_deck_top",
-    "look_and_reorder",
-    "shuffle_deck",
-    "look_hand",
-    "return_own_runner_hand",
-    "return_own_equipment_hand",
-    "return_enemy_runner_hand",
-    "return_enemy_equipment_hand",
-    "return_enemy_runner_deck_bottom",
-    "destroy_enemy_runner",
-    "destroy_enemy_equipment",
-    "destroy_enemy_any",
-    "multi_return_enemy_runners_hand",
-    "passive_return_when_destroyed",
+    "draw", "look_deck_top", "look_and_reorder", "shuffle_deck", "look_hand",
+    "return_own_runner_hand", "return_own_equipment_hand",
+    "return_enemy_runner_hand", "return_enemy_equipment_hand", "return_enemy_runner_deck_bottom",
+    "destroy_enemy_runner", "destroy_enemy_equipment", "destroy_enemy_any",
+    "multi_return_enemy_runners_hand", "passive_return_when_destroyed",
 ]
-
 NodeSkill = Literal[
-    "view_node",
-    "online_node",
-    "offline_node",
-    "protect_node",
-    "move_runner",
-    "move_equipment",
-    "buff_runner_atk",
-    "buff_runner_hp",
-    "recover_runner",
-    "buff_equipment_atk",
-    "buff_equipment_hp",
-    "recover_equipment",
+    "view_node", "online_node", "offline_node", "protect_node", "move_runner", "move_equipment",
+    "buff_runner_atk", "buff_runner_hp", "recover_runner", "buff_equipment_atk", "buff_equipment_hp", "recover_equipment",
 ]
 
 
@@ -116,7 +104,7 @@ class NodeState:
 @dataclass
 class PlayerState:
     pid: int
-    deck: list[CardDef]
+    deck: list[CardDef] = field(default_factory=list)
     hand: list[CardDef] = field(default_factory=list)
     discard: list[CardDef] = field(default_factory=list)
     charge: int = 0
@@ -129,6 +117,7 @@ class GameStats:
     turns: int
     reason: str
     player_count: int
+    deck_mode: DeckMode
     played: Counter[str] = field(default_factory=Counter)
     drawn: Counter[str] = field(default_factory=Counter)
     node_skill_used: Counter[str] = field(default_factory=Counter)
@@ -188,19 +177,22 @@ DEFAULT_COPIES["G-011"] += 1
 
 
 class Game:
-    def __init__(self, rng: random.Random, player_count: int, max_turns: int = 30, opening_hand: int = 5):
+    def __init__(self, rng: random.Random, player_count: int, deck_mode: DeckMode, max_turns: int = 30, opening_hand: int = 5):
         if player_count not in (2, 3, 4):
             raise ValueError("player_count 只支持 2、3、4")
         self.rng = rng
         self.player_count = player_count
+        self.deck_mode = deck_mode
         self.max_turns = max_turns
         self.opening_hand = opening_hand
         self.nodes = [NodeState(node) for node in NODES]
-        self.players = [PlayerState(pid, self.make_deck()) for pid in range(player_count)]
-        self.stats = GameStats(winner=None, turns=0, reason="", player_count=player_count)
+        self.players = [PlayerState(pid) for pid in range(player_count)]
+        self.shared_deck: list[CardDef] = []
+        self.shared_discard: list[CardDef] = []
+        self.stats = GameStats(winner=None, turns=0, reason="", player_count=player_count, deck_mode=deck_mode)
         self.next_uid = 1
+        self.setup_decks()
         for player in self.players:
-            self.rng.shuffle(player.deck)
             self.draw(player, opening_hand)
 
     def make_deck(self) -> list[CardDef]:
@@ -209,23 +201,42 @@ class Game:
         for code, count in DEFAULT_COPIES.items():
             deck.extend([by_code[code]] * count)
         assert len(deck) == 62, f"临时测试牌库必须为62张，当前={len(deck)}"
+        self.rng.shuffle(deck)
         return deck
 
+    def setup_decks(self) -> None:
+        if self.deck_mode == "shared":
+            self.shared_deck = self.make_deck()
+        else:
+            for player in self.players:
+                player.deck = self.make_deck()
+
+    def active_deck(self, player: PlayerState) -> list[CardDef]:
+        return self.shared_deck if self.deck_mode == "shared" else player.deck
+
+    def active_discard(self, player: PlayerState) -> list[CardDef]:
+        return self.shared_discard if self.deck_mode == "shared" else player.discard
+
     def draw(self, player: PlayerState, n: int = 1) -> None:
+        deck = self.active_deck(player)
         for _ in range(n):
-            if not player.deck:
-                if player.discard:
-                    player.deck = player.discard[:]
-                    player.discard.clear()
-                    self.rng.shuffle(player.deck)
-                else:
-                    return
-            card = player.deck.pop(0)
+            if not deck:
+                return
+            card = deck.pop(0)
             player.hand.append(card)
             self.stats.drawn[card.code] += 1
 
+    def discard_card(self, owner_pid: int, card: CardDef) -> None:
+        self.active_discard(self.players[owner_pid]).append(card)
+
+    def return_card_to_deck_bottom(self, owner_pid: int, card: CardDef) -> None:
+        self.active_deck(self.players[owner_pid]).append(card)
+
     def enemies(self, pid: int) -> list[int]:
         return [p.pid for p in self.players if p.pid != pid]
+
+    def node_power(self, node: NodeState, pid: int) -> int:
+        return sum(entity.atk for entity in node.entities if entity.owner == pid)
 
     def entities_of(self, pid: int, card_type: Optional[CardType] = None) -> list[tuple[NodeState, Entity]]:
         result: list[tuple[NodeState, Entity]] = []
@@ -241,15 +252,6 @@ class Game:
             result.extend(self.entities_of(enemy_pid, card_type))
         return result
 
-    def node_power(self, node: NodeState, pid: int) -> int:
-        return sum(entity.atk for entity in node.entities if entity.owner == pid)
-
-    def strongest_enemy_pid_on_node(self, node: NodeState, pid: int) -> Optional[int]:
-        enemies = self.enemies(pid)
-        if not enemies:
-            return None
-        return max(enemies, key=lambda enemy: self.node_power(node, enemy))
-
     def update_control(self) -> None:
         for node in self.nodes:
             if node.protected_by is not None:
@@ -261,7 +263,6 @@ class Game:
             leaders = [pid for pid, power in powers.items() if power == best_power]
             if len(leaders) == 1:
                 node.controller = leaders[0]
-            # 并列时控制权不变。
 
     def check_winner(self) -> Optional[int]:
         domains = sorted({node.definition.domain for node in self.nodes})
@@ -272,16 +273,19 @@ class Game:
                     return pid
         return None
 
+    def clear_protection_for_player(self, pid: int) -> None:
+        for node in self.nodes:
+            if node.protected_by == pid:
+                node.protected_by = None
+
     def best_node_for_deploy(self, pid: int) -> NodeState:
         domains = sorted({node.definition.domain for node in self.nodes})
-        # 先补齐自己已经控制 2 座的系统域。
         for domain in domains:
             domain_nodes = [n for n in self.nodes if n.definition.domain == domain and n.online]
             if sum(1 for n in domain_nodes if n.controller == pid) == 2:
                 candidates = [n for n in domain_nodes if n.controller != pid]
                 if candidates:
-                    return min(candidates, key=lambda n: self.node_power(n, pid) - max(self.node_power(n, e) for e in self.enemies(pid)))
-        # 再阻止任意对手补齐 3 座。
+                    return min(candidates, key=lambda n: self.node_power(n, pid) - max([self.node_power(n, e) for e in self.enemies(pid)] or [0]))
         for enemy_pid in self.enemies(pid):
             for domain in domains:
                 domain_nodes = [n for n in self.nodes if n.definition.domain == domain and n.online]
@@ -289,28 +293,21 @@ class Game:
                     candidates = [n for n in domain_nodes if n.controller == enemy_pid]
                     if candidates:
                         return min(candidates, key=lambda n: self.node_power(n, pid) - self.node_power(n, enemy_pid))
-        # 最后选择最容易翻盘或空置的节点。
-        return min(
-            self.nodes,
-            key=lambda n: (
-                self.node_power(n, pid) - max([self.node_power(n, e) for e in self.enemies(pid)] or [0]),
-                len(n.entities),
-            ),
-        )
+        return min(self.nodes, key=lambda n: (self.node_power(n, pid) - max([self.node_power(n, e) for e in self.enemies(pid)] or [0]), len(n.entities)))
 
     def remove_entity(self, node: NodeState, entity: Entity, destination: str) -> None:
         node.entities.remove(entity)
-        owner = self.players[entity.owner]
         card = entity.card
+        owner = self.players[entity.owner]
         if destination == "hand":
             owner.hand.append(card)
         elif destination == "deck_bottom":
-            owner.deck.append(card)
+            self.return_card_to_deck_bottom(entity.owner, card)
         elif destination == "discard":
             if card.skill == "passive_return_when_destroyed":
                 owner.hand.append(card)
             else:
-                owner.discard.append(card)
+                self.discard_card(entity.owner, card)
         else:
             raise ValueError(f"unknown destination: {destination}")
 
@@ -318,11 +315,10 @@ class Game:
         targets = self.enemy_entities(pid, card_type)
         if not targets:
             return None
-        # 多人局中优先打击当前节点控制者、接近胜利者、高 ATK / 高费用目标。
         def score(item: tuple[NodeState, Entity]) -> tuple[int, int, int, int, int]:
             node, entity = item
-            owner_controls_node = 1 if node.controller == entity.owner else 0
             owner_controlled_online = sum(1 for n in self.nodes if n.controller == entity.owner and n.online)
+            owner_controls_node = 1 if node.controller == entity.owner else 0
             return (owner_controlled_online, owner_controls_node, entity.atk, entity.card.cost, entity.hp)
         return max(targets, key=score)
 
@@ -331,6 +327,22 @@ class Game:
         if not targets:
             return None
         return max(targets, key=lambda item: (item[1].card.cost, item[1].hp))
+
+    def choose_best_enemy_node_with_runners(self, pid: int) -> Optional[NodeState]:
+        candidates = [node for node in self.nodes if any(e.owner != pid and e.card.card_type == "runner" for e in node.entities)]
+        if not candidates:
+            return None
+        def score(node: NodeState) -> tuple[int, int, int]:
+            enemy_runners = [e for e in node.entities if e.owner != pid and e.card.card_type == "runner"]
+            controller_threat = sum(1 for n in self.nodes if n.controller == node.controller and n.online) if node.controller is not None else 0
+            return (controller_threat, len(enemy_runners), sum(e.atk for e in enemy_runners))
+        return max(candidates, key=score)
+
+    def deploy_entity(self, pid: int, card: CardDef) -> None:
+        node = self.best_node_for_deploy(pid)
+        node.entities.append(Entity(self.next_uid, card, pid))
+        self.next_uid += 1
+        self.update_control()
 
     def resolve_skill(self, pid: int, card: CardDef) -> bool:
         player = self.players[pid]
@@ -341,12 +353,13 @@ class Game:
         if skill == "look_deck_top":
             return True
         if skill == "look_and_reorder":
-            top = player.deck[:3]
+            deck = self.active_deck(player)
+            top = deck[:3]
             top.sort(key=lambda c: c.cost, reverse=True)
-            player.deck[: len(top)] = top
+            deck[: len(top)] = top
             return True
         if skill == "shuffle_deck":
-            self.rng.shuffle(player.deck)
+            self.rng.shuffle(self.active_deck(player))
             return True
         if skill == "look_hand":
             return bool(self.enemies(pid))
@@ -387,12 +400,18 @@ class Game:
             self.remove_entity(*target, destination="discard")
             return True
         if skill == "multi_return_enemy_runners_hand":
-            targets = self.enemy_entities(pid, "runner")
+            if card.code == "G-005":
+                node = self.choose_best_enemy_node_with_runners(pid)
+                if not node:
+                    return False
+                targets = [(node, e) for e in list(node.entities) if e.owner != pid and e.card.card_type == "runner"]
+            else:
+                targets = self.enemy_entities(pid, "runner")
+                targets.sort(key=lambda item: (item[1].atk, item[1].card.cost), reverse=True)
+                targets = targets[:2]
             if not targets:
                 return False
-            targets.sort(key=lambda item: (item[1].atk, item[1].card.cost), reverse=True)
-            count = 99 if card.code == "G-005" else 2
-            for node, entity in targets[:count]:
+            for node, entity in targets:
                 if entity in node.entities:
                     self.remove_entity(node, entity, destination="hand")
             return True
@@ -416,55 +435,47 @@ class Game:
             return True
         raise ValueError(f"unknown skill: {skill}")
 
+    def card_has_legal_target(self, pid: int, card: CardDef) -> bool:
+        if card.skill in {"return_enemy_runner_hand", "return_enemy_runner_deck_bottom", "destroy_enemy_runner", "multi_return_enemy_runners_hand"}:
+            return bool(self.enemy_entities(pid, "runner"))
+        if card.skill in {"return_enemy_equipment_hand", "destroy_enemy_equipment"}:
+            return bool(self.enemy_entities(pid, "equipment"))
+        if card.skill == "destroy_enemy_any":
+            return bool(self.enemy_entities(pid, None))
+        if card.skill == "return_own_runner_hand":
+            return bool(self.entities_of(pid, "runner"))
+        if card.skill == "return_own_equipment_hand":
+            return bool(self.entities_of(pid, "equipment"))
+        return True
+
     def play_card(self, pid: int, card: CardDef) -> bool:
         player = self.players[pid]
-        if player.charge < card.cost or card not in player.hand:
+        if player.charge < card.cost or card not in player.hand or not self.card_has_legal_target(pid, card):
             return False
-        target_required = {
-            "return_enemy_runner_hand", "return_enemy_equipment_hand", "return_enemy_runner_deck_bottom",
-            "destroy_enemy_runner", "destroy_enemy_equipment", "destroy_enemy_any", "multi_return_enemy_runners_hand",
-            "return_own_runner_hand", "return_own_equipment_hand",
-        }
-        if card.skill in target_required:
-            if not self.resolve_skill(pid, card):
-                return False
-            player.hand.remove(card)
-            player.charge -= card.cost
-        else:
-            player.hand.remove(card)
-            player.charge -= card.cost
-            self.resolve_skill(pid, card)
+        player.hand.remove(card)
+        player.charge -= card.cost
         if card.card_type in ("runner", "equipment"):
-            node = self.best_node_for_deploy(pid)
-            node.entities.append(Entity(self.next_uid, card, pid))
-            self.next_uid += 1
+            self.deploy_entity(pid, card)
+            self.resolve_skill(pid, card)
         else:
-            player.discard.append(card)
+            self.resolve_skill(pid, card)
+            self.discard_card(pid, card)
         self.stats.played[card.code] += 1
         self.update_control()
         return True
 
     def choose_card_to_play(self, pid: int) -> Optional[CardDef]:
         player = self.players[pid]
-        playable = [card for card in player.hand if card.cost <= player.charge]
+        playable = [card for card in player.hand if card.cost <= player.charge and self.card_has_legal_target(pid, card)]
         if not playable:
             return None
         priority = {
-            "destroy_enemy_any": 100,
-            "destroy_enemy_runner": 95,
-            "destroy_enemy_equipment": 90,
-            "multi_return_enemy_runners_hand": 85,
-            "return_enemy_runner_deck_bottom": 80,
-            "return_enemy_runner_hand": 75,
-            "return_enemy_equipment_hand": 70,
-            "draw": 60,
-            "look_and_reorder": 55,
-            "look_deck_top": 45,
-            "look_hand": 45,
-            "shuffle_deck": 35,
-            "passive_return_when_destroyed": 30,
-            "return_own_runner_hand": 20,
-            "return_own_equipment_hand": 20,
+            "destroy_enemy_any": 100, "destroy_enemy_runner": 95, "destroy_enemy_equipment": 90,
+            "multi_return_enemy_runners_hand": 85, "return_enemy_runner_deck_bottom": 80,
+            "return_enemy_runner_hand": 75, "return_enemy_equipment_hand": 70,
+            "draw": 60, "look_and_reorder": 55, "look_deck_top": 45, "look_hand": 45,
+            "shuffle_deck": 35, "passive_return_when_destroyed": 30,
+            "return_own_runner_hand": 20, "return_own_equipment_hand": 20,
         }
         playable.sort(key=lambda c: (priority.get(c.skill, 0), c.cost, c.atk or 0, c.hp or 0), reverse=True)
         return playable[0]
@@ -476,7 +487,7 @@ class Game:
         controlled = [n for n in self.nodes if n.controller == pid and n.online and n.definition.skill_fee <= player.charge]
         if not controlled:
             return
-        controlled.sort(key=lambda n: n.definition.skill_fee, reverse=True)
+        controlled.sort(key=lambda n: self.node_skill_priority(pid, n), reverse=True)
         for node in controlled:
             if self.resolve_node_skill(pid, node):
                 player.charge -= node.definition.skill_fee
@@ -484,6 +495,22 @@ class Game:
                 self.stats.node_skill_used[node.definition.code] += 1
                 self.update_control()
                 return
+
+    def node_skill_priority(self, pid: int, node: NodeState) -> tuple[int, int]:
+        skill = node.definition.skill
+        if skill == "protect_node":
+            return (90, node.definition.skill_fee)
+        if skill == "offline_node":
+            return (80, node.definition.skill_fee)
+        if skill in {"recover_runner", "recover_equipment"}:
+            return (70, node.definition.skill_fee)
+        if skill in {"move_runner", "move_equipment"}:
+            return (60, node.definition.skill_fee)
+        if skill in {"buff_runner_atk", "buff_equipment_atk"}:
+            return (50, node.definition.skill_fee)
+        if skill in {"online_node", "buff_runner_hp", "buff_equipment_hp"}:
+            return (40, node.definition.skill_fee)
+        return (10, node.definition.skill_fee)
 
     def resolve_node_skill(self, pid: int, node: NodeState) -> bool:
         skill = node.definition.skill
@@ -498,7 +525,7 @@ class Game:
             target.online = True
             return True
         if skill == "offline_node":
-            targets = [n for n in self.nodes if n.online and n.controller in self.enemies(pid)]
+            targets = [n for n in self.nodes if n.online and n.controller in self.enemies(pid) and n.protected_by is None]
             if not targets:
                 return False
             target = max(targets, key=lambda n: sum(1 for m in self.nodes if m.controller == n.controller and m.online))
@@ -508,7 +535,7 @@ class Game:
             own = [n for n in self.nodes if n.controller == pid and n.protected_by is None]
             if not own:
                 return False
-            target = self.rng.choice(own)
+            target = max(own, key=lambda n: sum(1 for m in self.nodes if m.definition.domain == n.definition.domain and m.controller == pid and m.online))
             target.protected_by = pid
             return True
         if skill in ("move_runner", "move_equipment"):
@@ -538,11 +565,12 @@ class Game:
             entity.hp_bonus += 1
             return True
         if skill == "recover_runner":
-            candidates = [c for c in player.discard if c.card_type == "runner"]
+            discard = self.active_discard(player)
+            candidates = [c for c in discard if c.card_type == "runner"]
             if not candidates:
                 return False
             card = max(candidates, key=lambda c: c.cost)
-            player.discard.remove(card)
+            discard.remove(card)
             player.hand.append(card)
             return True
         if skill == "buff_equipment_atk":
@@ -560,39 +588,55 @@ class Game:
             entity.hp_bonus += 1
             return True
         if skill == "recover_equipment":
-            candidates = [c for c in player.discard if c.card_type == "equipment"]
+            discard = self.active_discard(player)
+            candidates = [c for c in discard if c.card_type == "equipment"]
             if not candidates:
                 return False
             card = max(candidates, key=lambda c: c.cost)
-            player.discard.remove(card)
+            discard.remove(card)
             player.hand.append(card)
             return True
         return False
 
-    def reset_turn_flags(self) -> None:
-        for player in self.players:
-            player.used_node_skill_this_turn = False
-        for node in self.nodes:
-            node.protected_by = None
-
     def take_turn(self, turn_number: int, pid: int) -> None:
         player = self.players[pid]
+        self.clear_protection_for_player(pid)
+        player.used_node_skill_this_turn = False
         player.charge = min(turn_number, 10)
         self.draw(player, 1)
         self.use_node_skill(pid)
-        actions = 0
-        while actions < 8:
-            card = self.choose_card_to_play(pid)
-            if card is None:
-                break
-            if not self.play_card(pid, card):
-                break
-            actions += 1
+        card = self.choose_card_to_play(pid)
+        if card is not None:
+            self.play_card(pid, card)
+        player.charge = 0
         self.update_control()
+
+    def tiebreak_winner(self) -> tuple[Optional[int], str]:
+        online_counts = {pid: sum(1 for n in self.nodes if n.controller == pid and n.online) for pid in range(self.player_count)}
+        best = max(online_counts.values())
+        leaders = [pid for pid, count in online_counts.items() if count == best]
+        if best > 0 and len(leaders) == 1:
+            return leaders[0], "node_count_tiebreak"
+        atk_totals = {pid: sum(self.node_power(n, pid) for n in self.nodes if n.online) for pid in range(self.player_count)}
+        best_atk = max(atk_totals.values())
+        leaders = [pid for pid, value in atk_totals.items() if value == best_atk]
+        if best_atk > 0 and len(leaders) == 1:
+            return leaders[0], "atk_tiebreak"
+        domains = sorted({node.definition.domain for node in self.nodes})
+        domain_best = {pid: max(sum(1 for n in self.nodes if n.definition.domain == d and n.controller == pid and n.online) for d in domains) for pid in range(self.player_count)}
+        best_domain = max(domain_best.values())
+        leaders = [pid for pid, value in domain_best.items() if value == best_domain]
+        if best_domain > 0 and len(leaders) == 1:
+            return leaders[0], "domain_tiebreak"
+        entity_counts = {pid: len(self.entities_of(pid)) for pid in range(self.player_count)}
+        best_entities = max(entity_counts.values())
+        leaders = [pid for pid, value in entity_counts.items() if value == best_entities]
+        if best_entities > 0 and len(leaders) == 1:
+            return leaders[0], "entity_count_tiebreak"
+        return None, "draw"
 
     def run(self) -> GameStats:
         for turn in range(1, self.max_turns + 1):
-            self.reset_turn_flags()
             for pid in range(self.player_count):
                 self.take_turn(turn, pid)
                 winner = self.check_winner()
@@ -602,25 +646,17 @@ class Game:
                     self.stats.reason = "root_access"
                     return self.stats
         self.stats.turns = self.max_turns
-        online_counts = {pid: sum(1 for n in self.nodes if n.controller == pid and n.online) for pid in range(self.player_count)}
-        best = max(online_counts.values())
-        leaders = [pid for pid, count in online_counts.items() if count == best]
-        if best > 0 and len(leaders) == 1:
-            self.stats.winner = leaders[0]
-            self.stats.reason = "node_count_tiebreak"
-        else:
-            self.stats.winner = None
-            self.stats.reason = "draw"
+        self.stats.winner, self.stats.reason = self.tiebreak_winner()
         return self.stats
 
 
-def run_many(games: int, seed: int, max_turns: int, player_count: int) -> list[GameStats]:
+def default_deck_mode(players: int) -> DeckMode:
+    return "separate" if players == 2 else "shared"
+
+
+def run_many(games: int, seed: int, max_turns: int, player_count: int, deck_mode: DeckMode) -> list[GameStats]:
     root_rng = random.Random(seed)
-    results: list[GameStats] = []
-    for _ in range(games):
-        game = Game(random.Random(root_rng.randrange(10**12)), player_count=player_count, max_turns=max_turns)
-        results.append(game.run())
-    return results
+    return [Game(random.Random(root_rng.randrange(10**12)), player_count=player_count, deck_mode=deck_mode, max_turns=max_turns).run() for _ in range(games)]
 
 
 def pct(value: float) -> str:
@@ -630,6 +666,7 @@ def pct(value: float) -> str:
 def report(results: list[GameStats]) -> None:
     games = len(results)
     player_count = results[0].player_count if results else 0
+    deck_mode = results[0].deck_mode if results else "shared"
     wins = Counter(r.winner for r in results)
     reasons = Counter(r.reason for r in results)
     turns = [r.turns for r in results]
@@ -642,6 +679,7 @@ def report(results: list[GameStats]) -> None:
     print("归零者 / ZERO ACCESS｜2–4 人整套卡牌平衡模拟报告")
     print("=" * 72)
     print(f"玩家数：{player_count}")
+    print(f"牌库模式：{deck_mode}")
     print(f"模拟局数：{games}")
     for pid in range(player_count):
         print(f"P{pid}胜率：{pct(wins[pid] / games)}")
@@ -666,18 +704,18 @@ def report(results: list[GameStats]) -> None:
         print(f"- {code} {node.name}: 使用 {count} 次，平均每局 {count / games:.2f}")
 
     print("\n疑似平衡问题")
-    suspicious = []
+    suspicious: list[str] = []
     expected_win = 1 / player_count if player_count else 0
     for pid in range(player_count):
         win_rate = wins[pid] / games
         if abs(win_rate - expected_win) > 0.08:
             suspicious.append(f"P{pid} 胜率偏离均值：{pct(win_rate)}，理论均值约 {pct(expected_win)}。可能存在座位优势或回合顺序优势。")
     for card in CARDS:
-        used = played_total[card.code]
-        if used / games > 1.2 * player_count / 2:
-            suspicious.append(f"{card.code} {card.name} 使用率过高：{used / games:.2f}/局，可能过强或过便宜。")
-        if used / games < 0.03:
-            suspicious.append(f"{card.code} {card.name} 使用率过低：{used / games:.2f}/局，可能太贵、目标太少或 AI 不会用。")
+        used_per_game = played_total[card.code] / games
+        if used_per_game > 0.8:
+            suspicious.append(f"{card.code} {card.name} 使用率偏高：{used_per_game:.2f}/局，可能过强、过便宜或 AI 偏好过高。")
+        if used_per_game < 0.03:
+            suspicious.append(f"{card.code} {card.name} 使用率过低：{used_per_game:.2f}/局，可能太贵、目标太少或 AI 不会用。")
     if suspicious:
         for line in suspicious[:40]:
             print(f"- {line}")
@@ -686,24 +724,28 @@ def report(results: list[GameStats]) -> None:
 
     print("\n当前模拟假设")
     print("- 支持 2、3、4 人。")
-    print("- 每名玩家使用相同 62 张临时复制数牌库。")
-    print("- 节点全部开局在线且无主。")
-    print("- 节点控制采用各玩家 ATK 总和比较，最高者控制；并列时控制权不变。")
+    print("- 2 人默认 separate；3/4 人默认 shared。")
+    print("- 每回合最多使用 1 次节点技能，最多打出 1 张手牌。")
+    print("- 可部署实体先部署到节点，再结算入场技能。")
+    print("- 节点控制采用 ATK 总和比较，最高者控制；并列时控制权不变。")
+    print("- 保护持续到保护者下个回合开始。")
+    print("- 牌库耗尽后不自动重洗弃牌区。")
     print("- 控制同一系统域 3 座在线节点立即获胜。")
-    print("- 不模拟完整战斗伤害；消灭 / 返回类技能直接改变场面。")
     print("- AI 是启发式，不代表真人最优打法。")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="归零者 2–4 人整套卡牌平衡模拟器")
     parser.add_argument("--players", type=int, default=2, choices=[2, 3, 4], help="玩家数：2、3、4，默认2")
+    parser.add_argument("--deck-mode", choices=["shared", "separate"], default=None, help="牌库模式：shared 或 separate；默认 2人 separate，3/4人 shared")
     parser.add_argument("--games", type=int, default=1000, help="模拟局数，默认1000")
     parser.add_argument("--seed", type=int, default=7, help="随机种子，默认7")
     parser.add_argument("--max-turns", type=int, default=30, help="最大回合数，默认30")
     args = parser.parse_args()
     if args.games <= 0:
         raise SystemExit("--games 必须大于0")
-    results = run_many(args.games, args.seed, args.max_turns, args.players)
+    deck_mode: DeckMode = args.deck_mode or default_deck_mode(args.players)  # type: ignore[assignment]
+    results = run_many(args.games, args.seed, args.max_turns, args.players, deck_mode)
     report(results)
     return 0
 
