@@ -2,25 +2,23 @@
 # -*- coding: utf-8 -*-
 """
 归零者 / ZERO ACCESS
-2–4 人整套卡牌平衡模拟器 v0.5
+2–4 人整套卡牌平衡模拟器 v0.6
 
 运行：
     python scripts/balance_simulator.py --players 2 --games 1000 --seed 7
     python scripts/balance_simulator.py --players 3 --games 1000 --seed 7
     python scripts/balance_simulator.py --players 4 --games 1000 --seed 7
-    python scripts/balance_simulator.py --players 4 --deck-mode shared --games 1000 --seed 7
 
 当前规则假设：
-- 2 人默认 separate：双方各自使用 62 张临时测试牌库。
-- 3 / 4 人默认 shared：所有玩家共用 1 个 62 张临时测试手牌牌库和公共弃牌区。
+- 2 人默认 separate；3 / 4 人默认 shared。
 - 每名玩家每回合最多使用 1 次节点技能。
 - 每回合不限制打出手牌张数，只限制权限电荷资源。
-- 打出可部署实体时，先部署到节点，再结算入场技能。
-- 一次性物品不部署，直接结算技能。
-- 每次实体进入 / 离开节点、实体 ATK 改变、节点在线离线变化后，立即检查节点控制权与 Root Access。
-- 节点控制采用当前测试控制权算法：节点上 ATK 总和最高且大于 0 的玩家获得节点控制权；并列时控制权不变。
-- 保护持续到保护者下个回合开始。
-- 牌库耗尽后不自动重洗弃牌区。
+- 每名玩家在同一座节点上最多 3 个己方实体。
+- 节点只属于一个玩家，或处于无主状态。
+- 打出游侠 / 装备只能部署到无主节点或己方控制节点；部署到无主节点时获得节点控制权。
+- 攻击节点由自己控制节点中的己方游侠 / 装备发起；每派出 1 个实体支付 1 电荷。
+- 攻击成功后，存活攻方进入目标节点，攻击方获得节点控制权。
+- 不再使用“节点上 ATK 总和最高者自动获得控制权”的旧算法。
 
 重要说明：这是平衡压力测试器，不是最终规则引擎。
 """
@@ -36,6 +34,8 @@ import statistics
 
 CardType = Literal["runner", "one_shot", "equipment"]
 DeckMode = Literal["shared", "separate"]
+MAX_OWN_ENTITIES_PER_NODE = 3
+ATTACK_COST_PER_ENTITY = 1
 
 
 @dataclass(frozen=True)
@@ -65,6 +65,7 @@ class Entity:
     owner: int
     atk_bonus: int = 0
     hp_bonus: int = 0
+    attacked_this_turn: bool = False
 
     @property
     def atk(self) -> int:
@@ -104,6 +105,8 @@ class GameStats:
     played: Counter[str] = field(default_factory=Counter)
     drawn: Counter[str] = field(default_factory=Counter)
     node_skill_used: Counter[str] = field(default_factory=Counter)
+    attacks: int = 0
+    occupied: int = 0
 
 
 CARDS: list[CardDef] = [
@@ -161,8 +164,6 @@ DEFAULT_COPIES["G-011"] += 1
 
 class Game:
     def __init__(self, rng: random.Random, player_count: int, deck_mode: DeckMode, max_turns: int = 30, opening_hand: int = 5):
-        if player_count not in (2, 3, 4):
-            raise ValueError("player_count 只支持 2、3、4")
         self.rng = rng
         self.player_count = player_count
         self.deck_mode = deck_mode
@@ -180,7 +181,7 @@ class Game:
     def make_deck(self) -> list[CardDef]:
         by_code = {card.code: card for card in CARDS}
         deck = [by_code[code] for code, count in DEFAULT_COPIES.items() for _ in range(count)]
-        assert len(deck) == 62, f"临时测试牌库必须为62张，当前={len(deck)}"
+        assert len(deck) == 62
         self.rng.shuffle(deck)
         return deck
 
@@ -215,9 +216,6 @@ class Game:
     def enemies(self, pid: int) -> list[int]:
         return [p.pid for p in self.players if p.pid != pid]
 
-    def node_power(self, node: NodeState, pid: int) -> int:
-        return sum(entity.atk for entity in node.entities if entity.owner == pid)
-
     def entities_of(self, pid: int, card_type: Optional[CardType] = None) -> list[tuple[NodeState, Entity]]:
         return [(node, entity) for node in self.nodes for entity in node.entities if entity.owner == pid and (card_type is None or entity.card.card_type == card_type)]
 
@@ -227,17 +225,11 @@ class Game:
             result.extend(self.entities_of(enemy_pid, card_type))
         return result
 
-    def update_control(self) -> None:
-        for node in self.nodes:
-            if node.protected_by is not None:
-                continue
-            powers = {player.pid: self.node_power(node, player.pid) for player in self.players}
-            best_power = max(powers.values())
-            if best_power <= 0:
-                continue
-            leaders = [pid for pid, power in powers.items() if power == best_power]
-            if len(leaders) == 1:
-                node.controller = leaders[0]
+    def own_count_on_node(self, node: NodeState, pid: int) -> int:
+        return sum(1 for e in node.entities if e.owner == pid)
+
+    def node_power(self, node: NodeState, pid: int) -> int:
+        return sum(e.atk for e in node.entities if e.owner == pid)
 
     def check_winner(self) -> Optional[int]:
         domains = sorted({node.definition.domain for node in self.nodes})
@@ -248,34 +240,43 @@ class Game:
                     return pid
         return None
 
-    def apply_state_change(self) -> Optional[int]:
-        self.update_control()
-        return self.check_winner()
-
     def clear_protection_for_player(self, pid: int) -> Optional[int]:
         for node in self.nodes:
             if node.protected_by == pid:
                 node.protected_by = None
-        return self.apply_state_change()
+        return self.check_winner()
 
-    def best_node_for_deploy(self, pid: int) -> NodeState:
-        domains = sorted({node.definition.domain for node in self.nodes})
+    def legal_deploy_nodes(self, pid: int) -> list[NodeState]:
+        return [n for n in self.nodes if (n.controller is None or n.controller == pid) and self.own_count_on_node(n, pid) < MAX_OWN_ENTITIES_PER_NODE]
+
+    def best_node_for_deploy(self, pid: int) -> Optional[NodeState]:
+        candidates = self.legal_deploy_nodes(pid)
+        if not candidates:
+            return None
+        domains = sorted({n.definition.domain for n in self.nodes})
         for domain in domains:
-            domain_nodes = [n for n in self.nodes if n.definition.domain == domain and n.online]
-            if sum(1 for n in domain_nodes if n.controller == pid) == 2:
-                candidates = [n for n in domain_nodes if n.controller != pid]
-                if candidates:
-                    return min(candidates, key=lambda n: self.node_power(n, pid) - max([self.node_power(n, e) for e in self.enemies(pid)] or [0]))
-        for enemy_pid in self.enemies(pid):
-            for domain in domains:
-                domain_nodes = [n for n in self.nodes if n.definition.domain == domain and n.online]
-                if sum(1 for n in domain_nodes if n.controller == enemy_pid) == 2:
-                    candidates = [n for n in domain_nodes if n.controller == enemy_pid]
-                    if candidates:
-                        return min(candidates, key=lambda n: self.node_power(n, pid) - self.node_power(n, enemy_pid))
-        return min(self.nodes, key=lambda n: (self.node_power(n, pid) - max([self.node_power(n, e) for e in self.enemies(pid)] or [0]), len(n.entities)))
+            domain_nodes = [n for n in candidates if n.definition.domain == domain and n.online]
+            if sum(1 for n in self.nodes if n.definition.domain == domain and n.controller == pid and n.online) == 2 and domain_nodes:
+                return domain_nodes[0]
+        unowned = [n for n in candidates if n.controller is None]
+        if unowned:
+            return unowned[0]
+        return min(candidates, key=lambda n: self.own_count_on_node(n, pid))
+
+    def deploy_entity(self, pid: int, card: CardDef) -> Optional[int]:
+        node = self.best_node_for_deploy(pid)
+        if node is None:
+            return None
+        node.entities.append(Entity(self.next_uid, card, pid))
+        self.next_uid += 1
+        if node.controller is None:
+            node.controller = pid
+            self.stats.occupied += 1
+        return self.check_winner()
 
     def remove_entity(self, node: NodeState, entity: Entity, destination: str) -> None:
+        if entity not in node.entities:
+            return
         node.entities.remove(entity)
         card = entity.card
         owner = self.players[entity.owner]
@@ -289,163 +290,183 @@ class Game:
             else:
                 self.discard_card(entity.owner, card)
         else:
-            raise ValueError(f"unknown destination: {destination}")
+            raise ValueError(destination)
+        if node.controller == entity.owner and not any(e.owner == entity.owner for e in node.entities):
+            node.controller = None
 
     def choose_enemy_target(self, pid: int, card_type: Optional[CardType] = None) -> Optional[tuple[NodeState, Entity]]:
         targets = self.enemy_entities(pid, card_type)
         if not targets:
             return None
-        def score(item: tuple[NodeState, Entity]) -> tuple[int, int, int, int, int]:
-            node, entity = item
-            controlled_online = sum(1 for n in self.nodes if n.controller == entity.owner and n.online)
-            owns_node = 1 if node.controller == entity.owner else 0
-            return (controlled_online, owns_node, entity.atk, entity.card.cost, entity.hp)
-        return max(targets, key=score)
+        return max(targets, key=lambda item: (item[1].atk, item[1].card.cost, item[1].hp))
 
-    def choose_own_target(self, pid: int, card_type: Optional[CardType] = None) -> Optional[tuple[NodeState, Entity]]:
+    def choose_own_target(self, pid: int, card_type: CardType) -> Optional[tuple[NodeState, Entity]]:
         targets = self.entities_of(pid, card_type)
         return max(targets, key=lambda item: (item[1].card.cost, item[1].hp)) if targets else None
-
-    def choose_best_enemy_node_with_runners(self, pid: int) -> Optional[NodeState]:
-        candidates = [node for node in self.nodes if any(e.owner != pid and e.card.card_type == "runner" for e in node.entities)]
-        if not candidates:
-            return None
-        def score(node: NodeState) -> tuple[int, int, int]:
-            enemy_runners = [e for e in node.entities if e.owner != pid and e.card.card_type == "runner"]
-            threat = sum(1 for n in self.nodes if n.controller == node.controller and n.online) if node.controller is not None else 0
-            return (threat, len(enemy_runners), sum(e.atk for e in enemy_runners))
-        return max(candidates, key=score)
-
-    def deploy_entity(self, pid: int, card: CardDef) -> Optional[int]:
-        node = self.best_node_for_deploy(pid)
-        node.entities.append(Entity(self.next_uid, card, pid))
-        self.next_uid += 1
-        return self.apply_state_change()
 
     def resolve_skill(self, pid: int, card: CardDef) -> bool:
         player = self.players[pid]
         skill = card.skill
-        if skill == "draw":
-            self.draw(player, 1); return True
-        if skill == "look_deck_top":
-            return True
+        if skill == "draw": self.draw(player, 1); return True
+        if skill == "look_deck_top": return True
         if skill == "look_and_reorder":
             deck = self.active_deck(player)
             top = deck[:3]
             top.sort(key=lambda c: c.cost, reverse=True)
             deck[:len(top)] = top
             return True
-        if skill == "shuffle_deck":
-            self.rng.shuffle(self.active_deck(player)); return True
-        if skill == "look_hand":
-            return bool(self.enemies(pid))
-        if skill == "return_enemy_runner_hand":
-            return self.apply_remove_target(pid, "runner", "hand")
-        if skill == "return_enemy_equipment_hand":
-            return self.apply_remove_target(pid, "equipment", "hand")
-        if skill == "return_enemy_runner_deck_bottom":
-            return self.apply_remove_target(pid, "runner", "deck_bottom")
-        if skill == "destroy_enemy_runner":
-            return self.apply_remove_target(pid, "runner", "discard")
-        if skill == "destroy_enemy_equipment":
-            return self.apply_remove_target(pid, "equipment", "discard")
-        if skill == "destroy_enemy_any":
-            return self.apply_remove_target(pid, None, "discard")
-        if skill == "multi_return_enemy_runners_hand":
-            targets: list[tuple[NodeState, Entity]]
-            if card.code == "G-005":
-                node = self.choose_best_enemy_node_with_runners(pid)
-                if not node:
-                    return False
-                targets = [(node, e) for e in list(node.entities) if e.owner != pid and e.card.card_type == "runner"]
-            else:
-                targets = self.enemy_entities(pid, "runner")
-                targets.sort(key=lambda item: (item[1].atk, item[1].card.cost), reverse=True)
-                targets = targets[:2]
-            if not targets:
-                return False
-            for node, entity in targets:
-                if entity in node.entities:
-                    self.remove_entity(node, entity, "hand")
-            return True
-        if skill == "return_own_runner_hand":
-            return self.apply_remove_own(pid, "runner")
-        if skill == "return_own_equipment_hand":
-            return self.apply_remove_own(pid, "equipment")
-        if skill == "passive_return_when_destroyed":
-            return True
-        raise ValueError(f"unknown skill: {skill}")
+        if skill == "shuffle_deck": self.rng.shuffle(self.active_deck(player)); return True
+        if skill == "look_hand": return True
+        if skill == "return_enemy_runner_hand": return self.apply_remove_target(pid, "runner", "hand")
+        if skill == "return_enemy_equipment_hand": return self.apply_remove_target(pid, "equipment", "hand")
+        if skill == "return_enemy_runner_deck_bottom": return self.apply_remove_target(pid, "runner", "deck_bottom")
+        if skill == "destroy_enemy_runner": return self.apply_remove_target(pid, "runner", "discard")
+        if skill == "destroy_enemy_equipment": return self.apply_remove_target(pid, "equipment", "discard")
+        if skill == "destroy_enemy_any": return self.apply_remove_target(pid, None, "discard")
+        if skill == "multi_return_enemy_runners_hand": return self.apply_multi_return(pid, card)
+        if skill == "return_own_runner_hand": return self.apply_remove_own(pid, "runner")
+        if skill == "return_own_equipment_hand": return self.apply_remove_own(pid, "equipment")
+        return True
 
     def apply_remove_target(self, pid: int, card_type: Optional[CardType], destination: str) -> bool:
         target = self.choose_enemy_target(pid, card_type)
-        if not target:
-            return False
+        if not target: return False
         self.remove_entity(*target, destination=destination)
         return True
 
+    def apply_multi_return(self, pid: int, card: CardDef) -> bool:
+        if card.code == "G-005":
+            candidates = [n for n in self.nodes if any(e.owner != pid and e.card.card_type == "runner" for e in n.entities)]
+            if not candidates: return False
+            node = max(candidates, key=lambda n: sum(e.atk for e in n.entities if e.owner != pid and e.card.card_type == "runner"))
+            targets = [(node, e) for e in list(node.entities) if e.owner != pid and e.card.card_type == "runner"]
+        else:
+            targets = self.enemy_entities(pid, "runner")[:2]
+        for node, entity in targets:
+            self.remove_entity(node, entity, "hand")
+        return bool(targets)
+
     def apply_remove_own(self, pid: int, card_type: CardType) -> bool:
         target = self.choose_own_target(pid, card_type)
-        if not target:
-            return False
-        node, entity = target
-        strongest_enemy = max([self.node_power(node, e) for e in self.enemies(pid)] or [0])
-        if node.controller == pid and self.node_power(node, pid) - entity.atk <= strongest_enemy:
-            return False
-        self.remove_entity(node, entity, "hand")
+        if not target: return False
+        self.remove_entity(*target, destination="hand")
         return True
 
     def card_has_legal_target(self, pid: int, card: CardDef) -> bool:
-        if card.skill in {"return_enemy_runner_hand", "return_enemy_runner_deck_bottom", "destroy_enemy_runner", "multi_return_enemy_runners_hand"}:
-            return bool(self.enemy_entities(pid, "runner"))
-        if card.skill in {"return_enemy_equipment_hand", "destroy_enemy_equipment"}:
-            return bool(self.enemy_entities(pid, "equipment"))
-        if card.skill == "destroy_enemy_any":
-            return bool(self.enemy_entities(pid, None))
-        if card.skill == "return_own_runner_hand":
-            return bool(self.entities_of(pid, "runner"))
-        if card.skill == "return_own_equipment_hand":
-            return bool(self.entities_of(pid, "equipment"))
+        if card.card_type in ("runner", "equipment") and not self.legal_deploy_nodes(pid): return False
+        if card.skill in {"return_enemy_runner_hand", "return_enemy_runner_deck_bottom", "destroy_enemy_runner", "multi_return_enemy_runners_hand"}: return bool(self.enemy_entities(pid, "runner"))
+        if card.skill in {"return_enemy_equipment_hand", "destroy_enemy_equipment"}: return bool(self.enemy_entities(pid, "equipment"))
+        if card.skill == "destroy_enemy_any": return bool(self.enemy_entities(pid, None))
+        if card.skill == "return_own_runner_hand": return bool(self.entities_of(pid, "runner"))
+        if card.skill == "return_own_equipment_hand": return bool(self.entities_of(pid, "equipment"))
         return True
 
     def play_card(self, pid: int, card: CardDef) -> Optional[int]:
         player = self.players[pid]
-        if player.charge < card.cost or card not in player.hand or not self.card_has_legal_target(pid, card):
-            return None
+        if player.charge < card.cost or card not in player.hand or not self.card_has_legal_target(pid, card): return None
         player.hand.remove(card)
         player.charge -= card.cost
-        winner: Optional[int] = None
+        winner = None
         if card.card_type in ("runner", "equipment"):
             winner = self.deploy_entity(pid, card)
-            if winner is None:
-                self.resolve_skill(pid, card)
-                winner = self.apply_state_change()
+            if winner is None: self.resolve_skill(pid, card)
         else:
             self.resolve_skill(pid, card)
             self.discard_card(pid, card)
-            winner = self.apply_state_change()
         self.stats.played[card.code] += 1
-        return winner
+        return winner or self.check_winner()
 
     def choose_card_to_play(self, pid: int) -> Optional[CardDef]:
         player = self.players[pid]
         playable = [c for c in player.hand if c.cost <= player.charge and self.card_has_legal_target(pid, c)]
-        if not playable:
-            return None
-        priority = {
-            "destroy_enemy_any": 100, "destroy_enemy_runner": 95, "destroy_enemy_equipment": 90,
-            "multi_return_enemy_runners_hand": 85, "return_enemy_runner_deck_bottom": 80,
-            "return_enemy_runner_hand": 75, "return_enemy_equipment_hand": 70,
-            "draw": 60, "look_and_reorder": 55, "look_deck_top": 45, "look_hand": 45,
-            "shuffle_deck": 35, "passive_return_when_destroyed": 30,
-            "return_own_runner_hand": 20, "return_own_equipment_hand": 20,
-        }
+        if not playable: return None
+        priority = {"destroy_enemy_any": 100, "destroy_enemy_runner": 95, "destroy_enemy_equipment": 90, "multi_return_enemy_runners_hand": 85,
+                    "return_enemy_runner_deck_bottom": 80, "return_enemy_runner_hand": 75, "return_enemy_equipment_hand": 70,
+                    "draw": 60, "look_and_reorder": 55, "look_deck_top": 45, "look_hand": 45, "shuffle_deck": 35,
+                    "return_own_runner_hand": 20, "return_own_equipment_hand": 20}
         playable.sort(key=lambda c: (priority.get(c.skill, 0), c.cost, c.atk or 0, c.hp or 0), reverse=True)
         return playable[0]
 
+    def legal_attack_targets(self, pid: int) -> list[NodeState]:
+        return [n for n in self.nodes if n.controller != pid and n.protected_by is None and self.own_count_on_node(n, pid) < MAX_OWN_ENTITIES_PER_NODE]
+
+    def available_attackers(self, pid: int) -> list[tuple[NodeState, Entity]]:
+        return [(n, e) for n, e in self.entities_of(pid) if n.controller == pid and not e.attacked_this_turn and e.atk > 0]
+
+    def should_attack(self, pid: int) -> bool:
+        return self.players[pid].charge >= ATTACK_COST_PER_ENTITY and bool(self.legal_attack_targets(pid)) and bool(self.available_attackers(pid))
+
+    def choose_attack(self, pid: int) -> Optional[tuple[NodeState, list[tuple[NodeState, Entity]]]]:
+        targets = self.legal_attack_targets(pid)
+        attackers = self.available_attackers(pid)
+        if not targets or not attackers: return None
+        def target_score(n: NodeState) -> tuple[int, int, int]:
+            domain_have = sum(1 for x in self.nodes if x.definition.domain == n.definition.domain and x.controller == pid and x.online)
+            defender_power = sum(e.atk for e in n.entities if e.owner == n.controller) if n.controller is not None else 0
+            return (domain_have, 1 if n.controller is not None else 0, -defender_power)
+        target = max(targets, key=target_score)
+        cap = MAX_OWN_ENTITIES_PER_NODE - self.own_count_on_node(target, pid)
+        max_count = min(self.players[pid].charge // ATTACK_COST_PER_ENTITY, len(attackers), cap)
+        if max_count <= 0: return None
+        attackers.sort(key=lambda item: (item[1].atk, item[1].hp), reverse=True)
+        return target, attackers[:max_count]
+
+    def attack_node(self, pid: int) -> Optional[int]:
+        choice = self.choose_attack(pid)
+        if not choice: return None
+        target, attacker_pairs = choice
+        player = self.players[pid]
+        cost = len(attacker_pairs) * ATTACK_COST_PER_ENTITY
+        if player.charge < cost: return None
+        player.charge -= cost
+        self.stats.attacks += 1
+
+        attackers: list[Entity] = []
+        original_sources: dict[int, NodeState] = {}
+        for source, entity in attacker_pairs:
+            if entity in source.entities:
+                source.entities.remove(entity)
+                original_sources[entity.uid] = source
+                attackers.append(entity)
+                entity.attacked_this_turn = True
+
+        defender_owner = target.controller
+        defenders = [e for e in target.entities if defender_owner is not None and e.owner == defender_owner]
+        damage: dict[int, int] = Counter()
+
+        for attacker in attackers[:]:
+            if not defenders or attacker not in attackers: break
+            defender = max(defenders, key=lambda e: (e.atk, e.hp))
+            damage[attacker.uid] += defender.atk
+            damage[defender.uid] += attacker.atk
+            if damage[attacker.uid] >= attacker.hp:
+                attackers.remove(attacker)
+                self.discard_card(attacker.owner, attacker.card)
+            if damage[defender.uid] >= defender.hp:
+                defenders.remove(defender)
+                if defender in target.entities:
+                    target.entities.remove(defender)
+                self.discard_card(defender.owner, defender.card)
+
+        if not defenders and attackers:
+            for attacker in attackers:
+                target.entities.append(attacker)
+            target.controller = pid
+            self.stats.occupied += 1
+        elif not defenders and not attackers:
+            target.controller = None
+        else:
+            for attacker in attackers:
+                original_sources[attacker.uid].entities.append(attacker)
+
+        for source in set(original_sources.values()):
+            if source.controller == pid and not any(e.owner == pid for e in source.entities):
+                source.controller = None
+        return self.check_winner()
+
     def use_node_skill(self, pid: int) -> Optional[int]:
         player = self.players[pid]
-        if player.used_node_skill_this_turn:
-            return None
+        if player.used_node_skill_this_turn: return None
         controlled = [n for n in self.nodes if n.controller == pid and n.online and n.definition.skill_fee <= player.charge]
         controlled.sort(key=lambda n: self.node_skill_priority(n), reverse=True)
         for node in controlled:
@@ -453,14 +474,12 @@ class Game:
                 player.charge -= node.definition.skill_fee
                 player.used_node_skill_this_turn = True
                 self.stats.node_skill_used[node.definition.code] += 1
-                return self.apply_state_change()
+                return self.check_winner()
         return None
 
     def node_skill_priority(self, node: NodeState) -> tuple[int, int]:
-        skill = node.definition.skill
-        base = {"protect_node": 90, "offline_node": 80, "recover_runner": 70, "recover_equipment": 70,
-                "move_runner": 60, "move_equipment": 60, "buff_runner_atk": 50, "buff_equipment_atk": 50,
-                "online_node": 40, "buff_runner_hp": 40, "buff_equipment_hp": 40}.get(skill, 10)
+        base = {"protect_node": 90, "offline_node": 80, "recover_runner": 70, "recover_equipment": 70, "move_runner": 60, "move_equipment": 60,
+                "buff_runner_atk": 50, "buff_equipment_atk": 50, "online_node": 40, "buff_runner_hp": 40, "buff_equipment_hp": 40}.get(node.definition.skill, 10)
         return base, node.definition.skill_fee
 
     def resolve_node_skill(self, pid: int, node: NodeState) -> bool:
@@ -480,18 +499,18 @@ class Game:
         if skill == "protect_node":
             own = [n for n in self.nodes if n.controller == pid and n.protected_by is None]
             if not own: return False
-            target = max(own, key=lambda n: sum(1 for m in self.nodes if m.definition.domain == n.definition.domain and m.controller == pid and m.online))
-            target.protected_by = pid
+            max(own, key=lambda n: sum(1 for m in self.nodes if m.definition.domain == n.definition.domain and m.controller == pid and m.online)).protected_by = pid
             return True
         if skill in ("move_runner", "move_equipment"):
             ctype: CardType = "runner" if skill == "move_runner" else "equipment"
             own = self.entities_of(pid, ctype)
-            if not own: return False
+            targets = [n for n in self.nodes if n.controller == pid and self.own_count_on_node(n, pid) < MAX_OWN_ENTITIES_PER_NODE]
+            if not own or not targets: return False
             from_node, entity = max(own, key=lambda item: item[1].atk)
-            to_node = self.best_node_for_deploy(pid)
+            to_node = min(targets, key=lambda n: self.own_count_on_node(n, pid))
             if from_node is to_node: return False
-            from_node.entities.remove(entity)
-            to_node.entities.append(entity)
+            from_node.entities.remove(entity); to_node.entities.append(entity)
+            if from_node.controller == pid and not any(e.owner == pid for e in from_node.entities): from_node.controller = None
             return True
         if skill == "buff_runner_atk": return self.apply_buff(pid, "runner", "atk")
         if skill == "buff_runner_hp": return self.apply_buff(pid, "runner", "hp")
@@ -514,47 +533,42 @@ class Game:
         candidates = [c for c in discard if c.card_type == card_type]
         if not candidates: return False
         card = max(candidates, key=lambda c: c.cost)
-        discard.remove(card)
-        player.hand.append(card)
+        discard.remove(card); player.hand.append(card)
         return True
 
     def take_turn(self, turn_number: int, pid: int) -> Optional[int]:
         player = self.players[pid]
-        winner = self.clear_protection_for_player(pid)
-        if winner is not None: return winner
+        for node in self.nodes:
+            if node.protected_by == pid: node.protected_by = None
         player.used_node_skill_this_turn = False
+        for _, entity in self.entities_of(pid): entity.attacked_this_turn = False
         player.charge = min(turn_number, 10)
         self.draw(player, 1)
         winner = self.use_node_skill(pid)
         if winner is not None: return winner
+
         safety = 0
-        while safety < 30:
+        while safety < 40 and player.charge > 0:
             safety += 1
+            attack_option = self.should_attack(pid)
             card = self.choose_card_to_play(pid)
-            if card is None: break
-            winner = self.play_card(pid, card)
+            if attack_option and (card is None or player.charge <= 3 or self.rng.random() < 0.55):
+                winner = self.attack_node(pid)
+            elif card is not None:
+                winner = self.play_card(pid, card)
+            else:
+                break
             if winner is not None: return winner
         player.charge = 0
         return None
 
     def tiebreak_winner(self) -> tuple[Optional[int], str]:
         online_counts = {pid: sum(1 for n in self.nodes if n.controller == pid and n.online) for pid in range(self.player_count)}
-        best = max(online_counts.values())
-        leaders = [pid for pid, count in online_counts.items() if count == best]
+        best = max(online_counts.values()); leaders = [pid for pid, v in online_counts.items() if v == best]
         if best > 0 and len(leaders) == 1: return leaders[0], "node_count_tiebreak"
         atk_totals = {pid: sum(self.node_power(n, pid) for n in self.nodes if n.online) for pid in range(self.player_count)}
-        best_atk = max(atk_totals.values())
-        leaders = [pid for pid, value in atk_totals.items() if value == best_atk]
+        best_atk = max(atk_totals.values()); leaders = [pid for pid, v in atk_totals.items() if v == best_atk]
         if best_atk > 0 and len(leaders) == 1: return leaders[0], "atk_tiebreak"
-        domains = sorted({node.definition.domain for node in self.nodes})
-        domain_best = {pid: max(sum(1 for n in self.nodes if n.definition.domain == d and n.controller == pid and n.online) for d in domains) for pid in range(self.player_count)}
-        best_domain = max(domain_best.values())
-        leaders = [pid for pid, value in domain_best.items() if value == best_domain]
-        if best_domain > 0 and len(leaders) == 1: return leaders[0], "domain_tiebreak"
-        entity_counts = {pid: len(self.entities_of(pid)) for pid in range(self.player_count)}
-        best_entities = max(entity_counts.values())
-        leaders = [pid for pid, value in entity_counts.items() if value == best_entities]
-        if best_entities > 0 and len(leaders) == 1: return leaders[0], "entity_count_tiebreak"
         return None, "draw"
 
     def run(self) -> GameStats:
@@ -562,10 +576,7 @@ class Game:
             for pid in range(self.player_count):
                 winner = self.take_turn(turn, pid)
                 if winner is not None:
-                    self.stats.winner = winner
-                    self.stats.turns = turn
-                    self.stats.reason = "root_access"
-                    return self.stats
+                    self.stats.winner = winner; self.stats.turns = turn; self.stats.reason = "root_access"; return self.stats
         self.stats.turns = self.max_turns
         self.stats.winner, self.stats.reason = self.tiebreak_winner()
         return self.stats
@@ -585,84 +596,42 @@ def pct(value: float) -> str:
 
 
 def report(results: list[GameStats]) -> None:
-    games = len(results)
-    player_count = results[0].player_count if results else 0
-    deck_mode = results[0].deck_mode if results else "shared"
-    wins = Counter(r.winner for r in results)
-    reasons = Counter(r.reason for r in results)
-    turns = [r.turns for r in results]
-    played_total: Counter[str] = Counter()
-    node_skill_total: Counter[str] = Counter()
-    for r in results:
-        played_total.update(r.played)
-        node_skill_total.update(r.node_skill_used)
-
+    games = len(results); player_count = results[0].player_count; deck_mode = results[0].deck_mode
+    wins = Counter(r.winner for r in results); reasons = Counter(r.reason for r in results); turns = [r.turns for r in results]
+    played_total: Counter[str] = Counter(); node_skill_total: Counter[str] = Counter()
+    total_attacks = sum(r.attacks for r in results); total_occupied = sum(r.occupied for r in results)
+    for r in results: played_total.update(r.played); node_skill_total.update(r.node_skill_used)
     print("归零者 / ZERO ACCESS｜2–4 人整套卡牌平衡模拟报告")
     print("=" * 72)
-    print(f"玩家数：{player_count}")
-    print(f"牌库模式：{deck_mode}")
-    print(f"模拟局数：{games}")
+    print(f"玩家数：{player_count}"); print(f"牌库模式：{deck_mode}"); print(f"模拟局数：{games}")
     for pid in range(player_count): print(f"P{pid}胜率：{pct(wins[pid] / games)}")
     print(f"平局率：{pct(wins[None] / games)}")
-    print(f"平均结束回合：{statistics.mean(turns):.2f}")
-    print(f"中位结束回合：{statistics.median(turns):.1f}")
+    print(f"平均结束回合：{statistics.mean(turns):.2f}"); print(f"中位结束回合：{statistics.median(turns):.1f}")
     print("结束原因：" + ", ".join(f"{k}={v}" for k, v in reasons.items()))
-
+    print(f"平均攻击节点次数：{total_attacks / games:.2f}")
+    print(f"平均获得节点控制权次数：{total_occupied / games:.2f}")
     print("\n使用率最高的手牌卡 Top 12")
     for code, count in played_total.most_common(12):
-        card = next(c for c in CARDS if c.code == code)
-        print(f"- {code} {card.name}: 使用 {count} 次，平均每局 {count / games:.2f}")
-
-    print("\n使用率最低的手牌卡 Bottom 12")
-    for code in sorted([c.code for c in CARDS], key=lambda c: played_total[c])[:12]:
-        card = next(c for c in CARDS if c.code == code)
-        print(f"- {code} {card.name}: 使用 {played_total[code]} 次，平均每局 {played_total[code] / games:.2f}")
-
+        card = next(c for c in CARDS if c.code == code); print(f"- {code} {card.name}: {count / games:.2f}/局")
     print("\n节点技能使用 Top 12")
     for code, count in node_skill_total.most_common(12):
-        node = next(n for n in NODES if n.code == code)
-        print(f"- {code} {node.name}: 使用 {count} 次，平均每局 {count / games:.2f}")
-
-    print("\n疑似平衡问题")
-    suspicious: list[str] = []
-    expected_win = 1 / player_count if player_count else 0
-    for pid in range(player_count):
-        win_rate = wins[pid] / games
-        if abs(win_rate - expected_win) > 0.08:
-            suspicious.append(f"P{pid} 胜率偏离均值：{pct(win_rate)}，理论均值约 {pct(expected_win)}。可能存在座位优势或回合顺序优势。")
-    for card in CARDS:
-        used_per_game = played_total[card.code] / games
-        if used_per_game > 0.8:
-            suspicious.append(f"{card.code} {card.name} 使用率偏高：{used_per_game:.2f}/局，可能过强、过便宜或 AI 偏好过高。")
-        if used_per_game < 0.03:
-            suspicious.append(f"{card.code} {card.name} 使用率过低：{used_per_game:.2f}/局，可能太贵、目标太少或 AI 不会用。")
-    if suspicious:
-        for line in suspicious[:40]: print(f"- {line}")
-    else:
-        print("- 未发现明显异常。")
-
+        node = next(n for n in NODES if n.code == code); print(f"- {code} {node.name}: {count / games:.2f}/局")
     print("\n当前模拟假设")
-    print("- 支持 2、3、4 人。")
-    print("- 2 人默认 separate；3/4 人默认 shared。")
-    print("- 每回合最多使用 1 次节点技能。")
-    print("- 每回合不限制打出手牌张数，只限制电荷资源。")
-    print("- 可部署实体先部署到节点，再结算入场技能。")
-    print("- 每次状态变化后立即检查节点控制权与 Root Access。")
-    print("- 节点控制采用 ATK 总和比较，最高者获得节点控制权；并列时控制权不变。")
-    print("- 保护持续到保护者下个回合开始。")
-    print("- 牌库耗尽后不自动重洗弃牌区。")
-    print("- AI 是启发式，不代表真人最优打法。")
+    print("- 每名玩家在同一节点最多 3 个己方实体。")
+    print("- 节点只属于一个玩家，或无主。")
+    print("- 部署只能到无主节点或己方控制节点；部署到无主节点时获得节点控制权。")
+    print("- 攻击方可从自己控制的任意节点派出任意数量实体，受电荷限制；每个实体攻击费用 1 电荷。")
+    print("- 战斗后目标节点无守方且攻方有存活实体，则攻方获得节点控制权。")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="归零者 2–4 人整套卡牌平衡模拟器")
-    parser.add_argument("--players", type=int, default=2, choices=[2, 3, 4], help="玩家数：2、3、4，默认2")
-    parser.add_argument("--deck-mode", choices=["shared", "separate"], default=None, help="牌库模式：shared 或 separate；默认 2人 separate，3/4人 shared")
-    parser.add_argument("--games", type=int, default=1000, help="模拟局数，默认1000")
-    parser.add_argument("--seed", type=int, default=7, help="随机种子，默认7")
-    parser.add_argument("--max-turns", type=int, default=30, help="最大回合数，默认30")
+    parser.add_argument("--players", type=int, default=2, choices=[2, 3, 4])
+    parser.add_argument("--deck-mode", choices=["shared", "separate"], default=None)
+    parser.add_argument("--games", type=int, default=1000)
+    parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--max-turns", type=int, default=30)
     args = parser.parse_args()
-    if args.games <= 0: raise SystemExit("--games 必须大于0")
     deck_mode: DeckMode = args.deck_mode or default_deck_mode(args.players)  # type: ignore[assignment]
     report(run_many(args.games, args.seed, args.max_turns, args.players, deck_mode))
     return 0
