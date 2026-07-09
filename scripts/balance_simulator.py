@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 归零者 / ZERO ACCESS
-2–4 人整套卡牌平衡模拟器 v0.6
+2–4 人整套卡牌平衡模拟器 v0.7
 
 运行：
     python scripts/balance_simulator.py --players 2 --games 1000 --seed 7
@@ -16,6 +16,7 @@
 - 每名玩家在同一座节点上最多 3 个己方实体。
 - 节点只属于一个玩家，或处于无主状态。
 - 打出游侠 / 装备只能部署到无主节点或己方控制节点；部署到无主节点时获得节点控制权。
+- 刚上场的游侠 / 装备本回合不能参与攻击节点。
 - 攻击节点由自己控制节点中的己方游侠 / 装备发起；每派出 1 个实体支付 1 电荷。
 - 攻击成功后，存活攻方进入目标节点，攻击方获得节点控制权。
 - 不再使用“节点上 ATK 总和最高者自动获得控制权”的旧算法。
@@ -63,6 +64,7 @@ class Entity:
     uid: int
     card: CardDef
     owner: int
+    entered_turn: int
     atk_bonus: int = 0
     hp_bonus: int = 0
     attacked_this_turn: bool = False
@@ -168,6 +170,7 @@ class Game:
         self.player_count = player_count
         self.deck_mode = deck_mode
         self.max_turns = max_turns
+        self.current_turn = 0
         self.nodes = [NodeState(node) for node in NODES]
         self.players = [PlayerState(pid) for pid in range(player_count)]
         self.shared_deck: list[CardDef] = []
@@ -240,12 +243,6 @@ class Game:
                     return pid
         return None
 
-    def clear_protection_for_player(self, pid: int) -> Optional[int]:
-        for node in self.nodes:
-            if node.protected_by == pid:
-                node.protected_by = None
-        return self.check_winner()
-
     def legal_deploy_nodes(self, pid: int) -> list[NodeState]:
         return [n for n in self.nodes if (n.controller is None or n.controller == pid) and self.own_count_on_node(n, pid) < MAX_OWN_ENTITIES_PER_NODE]
 
@@ -267,7 +264,7 @@ class Game:
         node = self.best_node_for_deploy(pid)
         if node is None:
             return None
-        node.entities.append(Entity(self.next_uid, card, pid))
+        node.entities.append(Entity(self.next_uid, card, pid, entered_turn=self.current_turn))
         self.next_uid += 1
         if node.controller is None:
             node.controller = pid
@@ -391,7 +388,14 @@ class Game:
         return [n for n in self.nodes if n.controller != pid and n.protected_by is None and self.own_count_on_node(n, pid) < MAX_OWN_ENTITIES_PER_NODE]
 
     def available_attackers(self, pid: int) -> list[tuple[NodeState, Entity]]:
-        return [(n, e) for n, e in self.entities_of(pid) if n.controller == pid and not e.attacked_this_turn and e.atk > 0]
+        return [
+            (n, e)
+            for n, e in self.entities_of(pid)
+            if n.controller == pid
+            and not e.attacked_this_turn
+            and e.entered_turn < self.current_turn
+            and e.atk > 0
+        ]
 
     def should_attack(self, pid: int) -> bool:
         return self.players[pid].charge >= ATTACK_COST_PER_ENTITY and bool(self.legal_attack_targets(pid)) and bool(self.available_attackers(pid))
@@ -450,6 +454,7 @@ class Game:
 
         if not defenders and attackers:
             for attacker in attackers:
+                attacker.entered_turn = self.current_turn
                 target.entities.append(attacker)
             target.controller = pid
             self.stats.occupied += 1
@@ -537,6 +542,7 @@ class Game:
         return True
 
     def take_turn(self, turn_number: int, pid: int) -> Optional[int]:
+        self.current_turn = turn_number
         player = self.players[pid]
         for node in self.nodes:
             if node.protected_by == pid: node.protected_by = None
@@ -620,6 +626,7 @@ def report(results: list[GameStats]) -> None:
     print("- 每名玩家在同一节点最多 3 个己方实体。")
     print("- 节点只属于一个玩家，或无主。")
     print("- 部署只能到无主节点或己方控制节点；部署到无主节点时获得节点控制权。")
+    print("- 刚上场的实体本回合不能参与攻击节点。")
     print("- 攻击方可从自己控制的任意节点派出任意数量实体，受电荷限制；每个实体攻击费用 1 电荷。")
     print("- 战斗后目标节点无守方且攻方有存活实体，则攻方获得节点控制权。")
 
